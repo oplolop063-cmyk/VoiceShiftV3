@@ -14,13 +14,104 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - name: Build APK
+      - name: Create Android project and build
         run: |
-          if ls ./*.zip >/dev/null 2>&1; then unzip -o ./*.zip -d project; fi
-          DIR=$(dirname "$(find . -name settings.gradle -not -path './.git/*' | head -n1)")
-          cd "$DIR"
+          test -f voiceshift.html || { echo "voiceshift.html is missing from the repository root"; exit 1; }
+          mkdir -p build/app/src/main/java/app/voiceshift build/app/src/main/assets
+          cp voiceshift.html build/app/src/main/assets/voiceshift.html
+          cd build
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "VoiceShift"
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'app.voiceshift'
+              compileSdk 34
+              defaultConfig { applicationId 'app.voiceshift'; minSdk 24; targetSdk 34; versionCode 1; versionName '1.0' }
+              buildTypes { release { minifyEnabled false } }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          dependencies { implementation 'androidx.webkit:webkit:1.11.0' }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+              <uses-feature android:name="android.hardware.microphone" android:required="true"/>
+              <application android:label="VoiceShift" android:allowBackup="false"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/app/voiceshift/MainActivity.java <<'EOF'
+          package app.voiceshift;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.pm.PackageManager;
+          import android.os.Bundle;
+          import android.view.WindowManager;
+          import android.webkit.*;
+          import androidx.webkit.WebViewAssetLoader;
+
+          public class MainActivity extends Activity {
+              private WebView web;
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                      requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+                  final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this)).build();
+                  web = new WebView(this);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                          return loader.shouldInterceptRequest(r.getUrl());
+                      }
+                  });
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override public void onPermissionRequest(final PermissionRequest req) {
+                          runOnUiThread(() -> {
+                              if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+                                  req.grant(req.getResources());
+                              else req.deny();
+                          });
+                      }
+                  });
+                  setContentView(web);
+                  web.loadUrl("https://appassets.androidplatform.net/assets/voiceshift.html");
+              }
+
+              @Override public void onBackPressed() { moveTaskToBack(true); }
+          }
+          EOF
           gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: VoiceShift-apk
-          path: "**/app-debug.apk"
+          path: build/app/build/outputs/apk/debug/app-debug.apk
